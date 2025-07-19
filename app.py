@@ -5,66 +5,71 @@ from PIL import Image
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Fast PDF Keyword Finder (OCR)", layout="centered")
-st.title("⚡ Fast PDF Keyword Finder with OCR Fallback")
+st.set_page_config(page_title="PDF Table Extractor by Keyword", layout="centered")
+st.title("📄 PDF Table Extractor with OCR")
+st.markdown("Upload a scanned or text-based PDF and search by keyword (e.g., Application No). Returns full matching line.")
 
-pdf_file = st.file_uploader("📄 Upload PDF", type=["pdf"])
+# File upload
+pdf_file = st.file_uploader("📁 Upload PDF", type=["pdf"])
 
-# Keyword Input
+# Keyword input
 search_terms = []
-method = st.radio("How do you want to enter keywords?", ["Paste manually", "Upload .txt or .csv"])
-if method == "Paste manually":
-    input_text = st.text_area("Enter one keyword per line")
-    if input_text:
-        search_terms = [line.strip() for line in input_text.splitlines() if line.strip()]
+input_method = st.radio("How to provide keywords?", ["Paste here", "Upload .txt or .csv"])
+
+if input_method == "Paste here":
+    kw_text = st.text_area("Enter keywords (one per line)")
+    if kw_text:
+        search_terms = [line.strip() for line in kw_text.splitlines() if line.strip()]
 else:
-    keyword_file = st.file_uploader("Upload .txt or .csv file", type=["txt", "csv"])
-    if keyword_file:
-        if keyword_file.name.endswith(".txt"):
-            content = keyword_file.read().decode("utf-8")
-            search_terms = [line.strip() for line in content.splitlines() if line.strip()]
+    kw_file = st.file_uploader("Upload keyword file", type=["txt", "csv"])
+    if kw_file:
+        if kw_file.name.endswith(".txt"):
+            search_terms = kw_file.read().decode("utf-8").splitlines()
+            search_terms = [kw.strip() for kw in search_terms if kw.strip()]
         else:
-            df = pd.read_csv(keyword_file, header=None)
+            df = pd.read_csv(kw_file, header=None)
             search_terms = df.iloc[:, 0].dropna().astype(str).tolist()
 
-# Extract all text from PDF once
+# Extract lines (text or OCR)
 @st.cache_data(show_spinner=False)
-def extract_all_text(pdf_bytes):
+def extract_pdf_lines(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page_texts = []
+    all_lines = []
     for page in doc:
-        text = page.get_text().strip()
-        if not text:
-            # OCR fallback
-            pix = page.get_pixmap(dpi=200)  # reduced DPI for speed
-            image = Image.open(io.BytesIO(pix.tobytes("png")))
-            text = pytesseract.image_to_string(image)
-        page_texts.append(text)
-    return page_texts
+        text = page.get_text()
+        if not text.strip():
+            # Fallback to OCR
+            pix = page.get_pixmap(dpi=200)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            text = pytesseract.image_to_string(img)
+        page_lines = text.splitlines()
+        all_lines.extend([line.strip() for line in page_lines if line.strip()])
+    return all_lines
 
-def find_keywords_in_texts(page_texts, keywords):
+# Match each keyword to full line
+def match_keywords_to_lines(lines, keywords):
     results = []
     for kw in keywords:
-        found_pages = [str(i + 1) for i, text in enumerate(page_texts) if kw.lower() in text.lower()]
+        matched_line = next((line for line in lines if kw.lower() in line.lower()), None)
         results.append({
             "Keyword": kw,
-            "Found": "Yes" if found_pages else "No",
-            "Pages": ", ".join(found_pages)
+            "Found": "Yes" if matched_line else "No",
+            "Full Line (if found)": matched_line or ""
         })
     return pd.DataFrame(results)
 
-# Trigger search
-if st.button("🔍 Search Keywords"):
+# Main action
+if st.button("🔍 Find Matches"):
     if not pdf_file:
         st.warning("Please upload a PDF file.")
     elif not search_terms:
         st.warning("Please enter or upload keywords.")
     else:
-        with st.spinner("Extracting text and scanning PDF..."):
-            all_texts = extract_all_text(pdf_file.read())
-            result_df = find_keywords_in_texts(all_texts, search_terms)
+        with st.spinner("Extracting lines and searching..."):
+            lines = extract_pdf_lines(pdf_file.read())
+            df = match_keywords_to_lines(lines, search_terms)
             st.success("✅ Done!")
-            st.dataframe(result_df)
+            st.dataframe(df)
 
-            csv = result_df.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Download Results as CSV", csv, "results.csv", "text/csv")
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button("📥 Download as CSV", data=csv, file_name="matched_results.csv", mime="text/csv")
