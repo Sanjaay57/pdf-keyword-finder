@@ -4,97 +4,67 @@ import pytesseract
 from PIL import Image
 import pandas as pd
 import io
-import re
 
-st.set_page_config(page_title="Smart PDF Table Finder", layout="centered")
-st.title("📄 Auto Table Extractor with Search")
+st.set_page_config(page_title="Fast PDF Keyword Finder (OCR)", layout="centered")
+st.title("⚡ Fast PDF Keyword Finder with OCR Fallback")
 
-pdf_file = st.file_uploader("📁 Upload PDF File", type=["pdf"])
+pdf_file = st.file_uploader("📄 Upload PDF", type=["pdf"])
 
+# Keyword Input
 search_terms = []
-input_method = st.radio("Input Search Terms", ["Paste", "Upload .txt/.csv"])
-
-if input_method == "Paste":
-    text_input = st.text_area("Enter search terms:", height=150)
-    if text_input:
-        search_terms = [line.strip() for line in text_input.splitlines() if line.strip()]
+method = st.radio("How do you want to enter keywords?", ["Paste manually", "Upload .txt or .csv"])
+if method == "Paste manually":
+    input_text = st.text_area("Enter one keyword per line")
+    if input_text:
+        search_terms = [line.strip() for line in input_text.splitlines() if line.strip()]
 else:
-    file = st.file_uploader("Upload keyword file", type=["txt", "csv"])
-    if file:
-        if file.name.endswith(".txt"):
-            content = file.read().decode("utf-8")
+    keyword_file = st.file_uploader("Upload .txt or .csv file", type=["txt", "csv"])
+    if keyword_file:
+        if keyword_file.name.endswith(".txt"):
+            content = keyword_file.read().decode("utf-8")
             search_terms = [line.strip() for line in content.splitlines() if line.strip()]
         else:
-            df = pd.read_csv(file, header=None)
+            df = pd.read_csv(keyword_file, header=None)
             search_terms = df.iloc[:, 0].dropna().astype(str).tolist()
 
+# Extract all text from PDF once
 @st.cache_data(show_spinner=False)
-def extract_text_lines(pdf_bytes):
+def extract_all_text(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    all_lines = []
+    page_texts = []
     for page in doc:
-        text = page.get_text()
-        if not text.strip():
+        text = page.get_text().strip()
+        if not text:
             # OCR fallback
-            pix = page.get_pixmap(dpi=200)
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            text = pytesseract.image_to_string(img)
-        page_lines = [line.strip() for line in text.splitlines() if line.strip()]
-        all_lines.extend(page_lines)
-    return all_lines
+            pix = page.get_pixmap(dpi=200)  # reduced DPI for speed
+            image = Image.open(io.BytesIO(pix.tobytes("png")))
+            text = pytesseract.image_to_string(image)
+        page_texts.append(text)
+    return page_texts
 
-def is_likely_header(line):
-    return any(keyword in line.lower() for keyword in ["application", "seat", "category", "merit", "remarks"]) and len(re.split(r'\s{2,}|\|', line)) >= 3
+def find_keywords_in_texts(page_texts, keywords):
+    results = []
+    for kw in keywords:
+        found_pages = [str(i + 1) for i, text in enumerate(page_texts) if kw.lower() in text.lower()]
+        results.append({
+            "Keyword": kw,
+            "Found": "Yes" if found_pages else "No",
+            "Pages": ", ".join(found_pages)
+        })
+    return pd.DataFrame(results)
 
-def extract_table(lines):
-    header = None
-    rows = []
-    col_count = 0
-
-    for i, line in enumerate(lines):
-        if is_likely_header(line):
-            header_parts = re.split(r'\s{2,}|\|', line)
-            if len(header_parts) >= 3:
-                header = [h.strip() for h in header_parts]
-                col_count = len(header)
-                continue
-
-        if header:
-            row_parts = re.split(r'\s{2,}|\|', line)
-            if len(row_parts) == col_count:
-                rows.append([cell.strip() for cell in row_parts])
-
-    return header, rows
-
-def search_table_rows(rows, search_terms):
-    matched = []
-    for row in rows:
-        row_str = ' '.join(row).lower()
-        for term in search_terms:
-            if term.lower() in row_str:
-                matched.append(row)
-                break
-    return matched
-
-if st.button("🔍 Start Search"):
+# Trigger search
+if st.button("🔍 Search Keywords"):
     if not pdf_file:
-        st.warning("Upload a PDF first.")
+        st.warning("Please upload a PDF file.")
     elif not search_terms:
-        st.warning("Please enter search terms.")
+        st.warning("Please enter or upload keywords.")
     else:
-        with st.spinner("Extracting and analyzing..."):
-            lines = extract_text_lines(pdf_file.read())
-            header, rows = extract_table(lines)
-            if header:
-                matched_rows = search_table_rows(rows, search_terms)
-                if matched_rows:
-                    df = pd.DataFrame(matched_rows, columns=header[:len(matched_rows[0])])
-                    st.success("✅ Matches found:")
-                    st.dataframe(df)
+        with st.spinner("Extracting text and scanning PDF..."):
+            all_texts = extract_all_text(pdf_file.read())
+            result_df = find_keywords_in_texts(all_texts, search_terms)
+            st.success("✅ Done!")
+            st.dataframe(result_df)
 
-                    csv = df.to_csv(index=False).encode("utf-8")
-                    st.download_button("📥 Download CSV", data=csv, file_name="results.csv")
-                else:
-                    st.info("No matches found.")
-            else:
-                st.error("No table headers found. Please check the PDF format.")
+            csv = result_df.to_csv(index=False).encode("utf-8")
+            st.download_button("📥 Download Results as CSV", csv, "results.csv", "text/csv")
