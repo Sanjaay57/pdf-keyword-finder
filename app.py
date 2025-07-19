@@ -6,33 +6,30 @@ import pandas as pd
 import io
 import re
 
-st.set_page_config(page_title="Structured Table Extractor", layout="centered")
-st.title("📄 PDF Table Extractor (Search + Structured Output)")
+st.set_page_config(page_title="Smart PDF Table Finder", layout="centered")
+st.title("📄 Auto Table Extractor with Search")
 
-# Upload PDF
 pdf_file = st.file_uploader("📁 Upload PDF File", type=["pdf"])
 
-# Upload or Paste Keywords
 search_terms = []
-input_method = st.radio("Keyword Input Method", ["Paste manually", "Upload .txt or .csv"])
+input_method = st.radio("Input Search Terms", ["Paste", "Upload .txt/.csv"])
 
-if input_method == "Paste manually":
-    text_input = st.text_area("Enter keywords (Application No or Seat No):", height=150)
+if input_method == "Paste":
+    text_input = st.text_area("Enter search terms:", height=150)
     if text_input:
         search_terms = [line.strip() for line in text_input.splitlines() if line.strip()]
 else:
-    kw_file = st.file_uploader("Upload keyword file", type=["txt", "csv"])
-    if kw_file:
-        if kw_file.name.endswith(".txt"):
-            content = kw_file.read().decode("utf-8")
+    file = st.file_uploader("Upload keyword file", type=["txt", "csv"])
+    if file:
+        if file.name.endswith(".txt"):
+            content = file.read().decode("utf-8")
             search_terms = [line.strip() for line in content.splitlines() if line.strip()]
         else:
-            df = pd.read_csv(kw_file, header=None)
+            df = pd.read_csv(file, header=None)
             search_terms = df.iloc[:, 0].dropna().astype(str).tolist()
 
-# Extract lines from PDF (OCR if needed)
 @st.cache_data(show_spinner=False)
-def extract_lines(pdf_bytes):
+def extract_text_lines(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     all_lines = []
     for page in doc:
@@ -42,58 +39,62 @@ def extract_lines(pdf_bytes):
             pix = page.get_pixmap(dpi=200)
             img = Image.open(io.BytesIO(pix.tobytes("png")))
             text = pytesseract.image_to_string(img)
-        page_lines = text.splitlines()
-        all_lines.extend([line.strip() for line in page_lines if line.strip()])
+        page_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        all_lines.extend(page_lines)
     return all_lines
 
-# Parse structured row from matched line
-def parse_row(line):
-    parts = [p.strip() for p in re.split(r'\s*\|\s*', line)]
-    return {
-        "Common Merit No": parts[0] if len(parts) > 0 else "",
-        "Application No": parts[1] if len(parts) > 1 else "",
-        "Seat No": parts[2] if len(parts) > 2 else "",
-        "Category": parts[3] if len(parts) > 3 else "",
-        "Remarks": parts[4] if len(parts) > 4 else "",
-        "Raw Line": line
-    }
+def is_likely_header(line):
+    return any(keyword in line.lower() for keyword in ["application", "seat", "category", "merit", "remarks"]) and len(re.split(r'\s{2,}|\|', line)) >= 3
 
-# Search and extract rows
-def match_and_parse(lines, keywords):
-    results = []
-    for keyword in keywords:
-        matched_line = next((line for line in lines if keyword.lower() in line.lower()), None)
-        if matched_line:
-            parsed = parse_row(matched_line)
-            parsed["Keyword"] = keyword
-            parsed["Found"] = "Yes"
-        else:
-            parsed = {
-                "Keyword": keyword,
-                "Found": "No",
-                "Common Merit No": "",
-                "Application No": "",
-                "Seat No": "",
-                "Category": "",
-                "Remarks": "",
-                "Raw Line": ""
-            }
-        results.append(parsed)
-    return pd.DataFrame(results)
+def extract_table(lines):
+    header = None
+    rows = []
+    col_count = 0
 
-# Action
-if st.button("🔍 Search Now"):
+    for i, line in enumerate(lines):
+        if is_likely_header(line):
+            header_parts = re.split(r'\s{2,}|\|', line)
+            if len(header_parts) >= 3:
+                header = [h.strip() for h in header_parts]
+                col_count = len(header)
+                continue
+
+        if header:
+            row_parts = re.split(r'\s{2,}|\|', line)
+            if len(row_parts) == col_count:
+                rows.append([cell.strip() for cell in row_parts])
+
+    return header, rows
+
+def search_table_rows(rows, search_terms):
+    matched = []
+    for row in rows:
+        row_str = ' '.join(row).lower()
+        for term in search_terms:
+            if term.lower() in row_str:
+                matched.append(row)
+                break
+    return matched
+
+if st.button("🔍 Start Search"):
     if not pdf_file:
-        st.warning("Please upload a PDF.")
+        st.warning("Upload a PDF first.")
     elif not search_terms:
-        st.warning("Please provide keywords.")
+        st.warning("Please enter search terms.")
     else:
-        with st.spinner("Processing PDF..."):
-            all_lines = extract_lines(pdf_file.read())
-            df = match_and_parse(all_lines, search_terms)
-            st.success("✅ Done!")
-            st.dataframe(df)
+        with st.spinner("Extracting and analyzing..."):
+            lines = extract_text_lines(pdf_file.read())
+            header, rows = extract_table(lines)
+            if header:
+                matched_rows = search_table_rows(rows, search_terms)
+                if matched_rows:
+                    df = pd.DataFrame(matched_rows, columns=header[:len(matched_rows[0])])
+                    st.success("✅ Matches found:")
+                    st.dataframe(df)
 
-            # Download
-            csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Download CSV", data=csv, file_name="matched_results.csv", mime="text/csv")
+                    csv = df.to_csv(index=False).encode("utf-8")
+                    st.download_button("📥 Download CSV", data=csv, file_name="results.csv")
+                else:
+                    st.info("No matches found.")
+            else:
+                st.error("No table headers found. Please check the PDF format.")
